@@ -351,8 +351,3 @@ failing, which is a guess rather than a rule. The second risk is a company with
 fewer than three complete fiscal years, where the two-year window has to shrink
 to whatever is available. Neither happens anywhere in `public_test`, so both
 paths are untested against real answers.
-
----
-
-**Task 2 (Reflection)** is in [`reflection.pdf`](reflection.pdf).
-
