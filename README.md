@@ -171,13 +171,188 @@ companies with the same tools and the same answer key rules, but different
 names and wording, and scores your 3 points only.
 
 ## Homework 3 solution:
-> to students: this is your report, see the homework description.
+
+**Points chosen: 1, 2 and 5.** They form one argument rather than three separate
+checks. Point 1 asks whether there is a runway long enough to be worth owning;
+point 2 asks whether the company refills that runway when today's products
+mature; point 5 asks whether the growth is actually profitable. A company can
+pass any one of them and still be a poor Fisher stock, but it is hard to pass
+all three without being the kind of business he describes.
+
+All three rules compare the company with the **median of its own industry**
+instead of a fixed number. This matters: a 10% operating margin is respectable
+in food ingredients and weak in medical devices, so an absolute threshold would
+mostly be measuring the industry, not the company.
 
 ### My 3 points and rules
-> for each point: why you chose it, your PASS rule in one or two sentences, and the evidence it uses. Quote Fisher where it helps.
+
+**Point 1 — market potential for sales growth**
+
+> "Does the company have products or services with sufficient market potential
+> to make possible a sizable increase in sales for at least several years?"
+
+*Why:* this is the foundation of the whole framework. Fisher is not looking for
+one good year; he wants a runway that lasts "at least several years", which is
+why the rule uses a two-year change rather than the latest quarter.
+
+*Rule:* **PASS** if revenue in the last complete fiscal year is at least
+`revenue_growth_2y_pct` above revenue two years earlier, where that median is
+the one for the company's own industry. Otherwise **FAIL**.
+
+*Evidence:* `orders` only (`SUM(amount)` grouped by year), compared with
+`industry_medians`. The "last complete fiscal year" is found from the data —
+the year with twelve months of orders — so the partial 2026 in the database is
+never compared with a full year.
+
+**Point 2 — new products as current lines mature**
+
+> "Does the management have a determination to continue to develop products or
+> processes that will still further increase total sales potentials when the
+> growth potentials of currently attractive product lines have largely been
+> exploited?"
+
+*Why:* point 1 measures the runway; point 2 measures whether the company is
+building the next one. Fisher's concern is a company that looks excellent until
+its current product matures and then has nothing behind it.
+
+*Rule:* **PASS** if products launched on or after the first order date supply a
+larger share of the last complete year's revenue than the industry median
+`new_product_share_pct`. Otherwise **FAIL**.
+
+*Evidence:* `products` joined to `orders` (`launch_date` decides what counts as
+new, `amount` decides how much it sold), compared with `industry_medians`.
+
+**Point 5 — a worthwhile profit margin**
+
+> "Does the company have a worthwhile profit margin?"
+
+*Why:* growth that does not turn into operating profit is not what Fisher means
+by a good business, and margin is also the cheapest thing to check honestly —
+it is pure arithmetic, with no management narrative in the way.
+
+*Rule:* **PASS** if the operating margin for the last complete fiscal year,
+`(revenue − cost of sales − selling and admin − R&D) ÷ revenue`, is above the
+industry median `operating_margin_pct`. Otherwise **FAIL**.
+
+*Evidence:* `orders` for revenue and `monthly_costs` for the three cost lines,
+compared with `industry_medians`. The margin history (2023 → 2025) is also
+computed and given to the model, but it does not change the verdict.
+
+**Why not the interview points.** Points 4, 7, 8, 9 and 11 are better Fisher
+questions in some ways, but their evidence is a paragraph of prose, so the
+verdict would rest on the model's reading rather than on a reproducible
+calculation. With ten interviews per company and a graded private set, I
+preferred three points whose answer I can defend line by line in SQL.
 
 ### Design
-> a visualization of your agent design and one paragraph describing it.
+
+```mermaid
+flowchart TD
+    A["Company folder<br/>(20 in public_test)"] --> B["4 LangChain tools<br/>list_documents · read_document<br/>sql_query · interview"]
+
+    subgraph P["One task per company, 4 running at once (asyncio.gather)"]
+        direction TB
+        S1["Stage 1 · Routing<br/>points 1, 2, 5 are database points"]
+        S2["Stage 2 · SQL evidence<br/>7 read-only queries via sql_query"]
+        S3["Stage 3 · Rules<br/>PASS/FAIL decided in Python"]
+        S4["Stage 4 · Scuttlebutt<br/>2 interviews, planned from the<br/>who-knows-what table"]
+        S5["Stage 5 · Documents<br/>list_documents + 2 reads<br/>(annual letter, latest call)"]
+        S6["Stage 6 · LLM summary<br/>one call, grounded on the<br/>numbers computed in stage 2"]
+        S7["Stage 7 · Reflection gate<br/>validate, retry once,<br/>else template summary"]
+        S1 --> S2 --> S3 --> S6
+        S4 --> S6
+        S5 --> S6
+        S6 --> S7
+    end
+
+    S3 -. "verdicts are final" .-> OUT["results.csv"]
+    S7 --> OUT
+```
+
+The agent is deliberately split into a **deterministic core** and a **narrative
+layer**. Stage 1 routes the three chosen points to the database, because that is
+where their evidence lives. Stage 2 runs seven read-only queries through
+`sql_query` and parses the pipe-separated output into numbers — every sum,
+ratio and comparison happens in SQL or Python, never in the model's head, which
+the assignment warns is the most common source of wrong verdicts. Stage 3 turns
+those numbers into PASS/FAIL with three fixed comparisons against the industry
+median, and those verdicts are final: nothing downstream can change them. Stage
+4 spends exactly two of the ten interviews, picked from the README's
+"who knows what" table so neither is wasted on somebody who cannot comment, and
+stage 5 reads the annual letter and the most recent earnings call — the call is
+chosen by date from `list_documents`, not by filename. Stage 6 is the only model
+call per company: it receives the fact sheet, the three verdicts, the two
+document extracts and the interview quotes, and writes a 2–4 sentence summary
+that must not contradict the verdicts or invent a number. Stage 7 is the
+reflection step — a code-level check that rejects a summary which is too short,
+never states a verdict, or apologises instead of answering, and asks the model
+once more before falling back to a template built from the same numbers. Twenty
+companies run four at a time, so a full pass takes about 35 seconds.
+
+| Point | Source | Tool calls | What decides the verdict |
+| --- | --- | --- | --- |
+| 1 | database | `sql_query` × 3 | Python comparison with `revenue_growth_2y_pct` |
+| 2 | database | `sql_query` × 2 | Python comparison with `new_product_share_pct` |
+| 5 | database | `sql_query` × 2 | Python comparison with `operating_margin_pct` |
+| — | documents | `list_documents`, `read_document` × 2 | model, summary only |
+| — | interviews | `interview` × 2 | model, summary only |
 
 ### Results
-> your point score on `public_test`, the companies where your verdicts disagree with the public answers, and why.
+
+**Point score on `public_test`: 60/60 correct, balanced accuracy 100.0%**
+(`1: 20/20`, `2: 20/20`, `5: 20/20`). Three consecutive runs gave the same
+score in 31–42 seconds each, and two interviews per company were used, never
+more. `results.csv` is regenerated by:
+
+```bash
+python3 hw3.py --data-folder public_test
+```
+
+**Companies where my verdicts disagree with the public answers: none.** Every
+one of the 20 companies matches `ground_truth.json` on all three points, so
+there is no disagreement to explain. What I can report honestly is where earlier
+versions of the rules *did* disagree, because that is what shaped the final ones.
+
+*I first tried point 3 (research effectiveness) and gave it up.* Three
+reasonable readings of "effective R&D" all disagreed with the answer key on the
+same six companies (`aurel_systems`, `driftwood_systems`, `dunmore_holdings`,
+`halcyon_works`, `ironbark_technologies`, `lindale_holdings`), scoring 14/20
+each: new-product sales ÷ R&D for the latest year, the same ratio cumulated over
+2023–2026, and the same ratio lagged one year. Two other readings were worse —
+R&D intensity (7/20) and "R&D spending was not cut" (12/20). The pattern in the
+failures was a threshold, not a definition: every failing company sat below
+about 1.5× the industry median while every passing company sat above about 2×.
+That is a rule I could only have found by fitting the public answers, and the
+assignment says the data never puts a company near the line — so a rule that
+needs a fitted multiplier is a rule that will not transfer to the private set. I
+dropped point 3 instead of tuning it.
+
+*The rules that survived are the ones where the gap is structural.* Point 1
+passes or fails by at least 3.1 percentage points, point 2 by at least 4.1, and
+point 5 by at least 1.7, with no company near the boundary. That margin is the
+reason I trust the result on unseen companies more than the 100% itself: the
+rules never look at a company name, a folder name, or any wording from the
+documents, and they derive every window from the data (first order date, last
+year with twelve months of orders) rather than from the calendar year 2025.
+
+*What the summaries add.* The verdicts are arithmetic, but the summaries are
+where the triangulation shows up. `ashgrove_labs` fails point 2, and the model
+noticed that the annual letter's emphasis on long-term research "is not showing
+up in new-product contribution", while a customer calling the product a
+commodity points the same way. On `hollins_group` management says the sales team
+is "second to none"; that claim is not tested by these three points, but the
+summary is instructed to flag any claim the numbers contradict, which is the
+habit Fisher's scuttlebutt method is really about.
+
+*Where this design could still lose points.* The main risk is a private company
+whose industry row is missing from `industry_medians`; the code then falls back
+to fixed thresholds (12% growth, 22% new-product share, 12% margin) instead of
+failing, which is a guess rather than a rule. The second risk is a company with
+fewer than three complete fiscal years, where the two-year window has to shrink
+to whatever is available. Neither happens anywhere in `public_test`, so both
+paths are untested against real answers.
+
+---
+
+**Task 2 (Reflection)** is in [`reflection.pdf`](reflection.pdf).
+
